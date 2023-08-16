@@ -1,0 +1,111 @@
+pipeline {  
+  agent {
+    label 'dot-runner-0'
+  }
+  tools {
+    // Install the Maven version configured as "M3" and add it to the path.
+    maven "maven"
+  }
+  stages {
+    stage('Checkout') {
+      steps {
+          cleanWs() // Clean before build
+          git branch: "release-23.07",
+          credentialsId: 'Manimozhi',
+          url: 'https://git.i.mercedes-benz.com/acm/classic.git/'
+		  }
+	  }
+ 		stage('Tagging') {
+      steps {
+          script {
+            sh "javac CreateVersionFromRevision.java"
+            sh "java CreateVersionFromRevision"
+            echo "DONE"
+            env.TAG = readFile(file: 'ReleaseVersion')
+          
+          } 
+      }
+    }
+    stage('Build Server') {     
+      steps {
+		      withCredentials([file(credentialsId: 'keyStore', variable: 'keyStore'), string(credentialsId: 'storePass', variable: 'storePass'), string(credentialsId: 'acmpass', variable: 'acmpasscode')]) {
+            sh ''' 
+              echo "****************************************Generating Server Started****************************************"
+            '''  
+            sh ''' 
+              mvn -s /home/tenant/acm/maven/settings.xml -B -f  server/pom.xml -U  clean deploy -DfailIfNoTests=false  -DskipTests=true  -P!openejb,websphere,nightly,action.generate -T4  -Djarsigner.alias=ACM -Djarsigner.keystore=$keyStore -Djarsigner.storepass=$storePass -Djarsigner.keypass=$acmpasscode
+            '''
+            sh ''' 
+              echo "****************************************Generating Server Completed****************************************"
+            '''
+          }
+      }
+    } 
+    
+    stage('Build Client') {
+      tools {
+        jdk  "JAVA_11"
+      } 
+      steps {
+        withCredentials([file(credentialsId: 'keyStore', variable: 'keyStore'), string(credentialsId: 'storePass', variable: 'storePass'), string(credentialsId: 'acmpass', variable: 'acmpasscode')]) {
+          sh ''' 
+            rm -rf /home/tenant/acm/workspace/ACM_Core_Delivery_Release_Java11/repository/com/daimler/acm 
+          '''
+          sh ''' 
+            echo "****************************************Generating Client Started****************************************"
+          '''
+          sh '''
+            mvn -s /home/tenant/acm/maven/settings.xml -X -B -f  client/pom.xml -U  verify -Pnightly -DskipTests -Djarsigner.alias=ACM -Djarsigner.keystore=$keyStore -Djarsigner.storepass=$storePass -Djarsigner.keypass=$acmpasscode
+          '''
+          sh ''' 
+            echo "****************************************Generating Client Completed****************************************"
+          '''
+        }
+      }  
+    } 
+    stage('GIT_Taging') {
+      steps {
+        echo "****************************************GIT Taging Started with ${TAG} ****************************************"
+        withCredentials([[$class: 'UsernamePasswordMultiBinding', credentialsId: 'Manimozhi', usernameVariable: 'GIT_USERNAME', passwordVariable: 'GIT_PASSWORD']]) {
+          sh("git tag -a ${TAG} -m 'Jenkins'")
+          sh("git push https://${env.GIT_USERNAME}:${env.GIT_PASSWORD}@git.i.mercedes-benz.com/acm/classic.git --tags")
+        }
+        echo "****************************************GIT Taging Completed with ${TAG} ****************************************"
+      }
+    }  
+    stage('UploadArtifacts'){
+      steps {
+        script {
+          def artifactory_server = Artifactory.server 'Jfrog_install'
+          def uploadSpec = """{
+              "files":[
+                {
+                  "pattern": "/home/tenant/acm/workspace/ACM_Core_Delivery_Release_Java11/server/acm-delivery/target/acm-delivery*.zip",
+                  "target": "acm-acm-maven-releases/com/daimler/acm/server/acm-delivery/"
+                },
+                {
+                 "pattern": "/home/tenant/acm/workspace/ACM_Core_Delivery_Release_Java11/client/client.enviroment/target/*.zip",
+                 "target": "acm-acm-maven-releases/com/daimler/acm/server/acm-delivery/"
+                },
+                {
+                    "pattern": "/home/tenant/acm/workspace/ACM_Core_Delivery_Release_Java11/client/com.daimler.acm.cec-delivery/target/*.zip",
+                    "target": "acm-acm-maven-releases/com/daimler/acm/server/acm-delivery/"
+                },
+                {
+                    "pattern": "/home/tenant/acm/workspace/ACM_Core_Delivery_Release_Java11/masterversion",
+                    "target": "acm-acm-maven-releases/com/daimler/acm/server/acm-delivery/"
+                },
+                {
+                    "pattern": "/home/tenant/acm/workspace/ACM_Core_Delivery_Release_Java11/acm-version.properties",
+                    "target": "acm-acm-maven-releases/com/daimler/acm/server/acm-delivery/"
+                }
+              ]
+            }"""
+            println(uploadSpec)
+            artifactory_server.upload(uploadSpec)
+        }
+      }
+    }
+  }
+
+} 
